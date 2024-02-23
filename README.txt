@@ -1,5 +1,7 @@
 Ola! Bem vindo ao meu programa preditor de precos baseado nos dataset de um site de alugueis! Como estaremos trabalhando com R (ate o momento domino muito pouco o Python, embora esteja estudando atualmente, me sinto mais confortavel para utiliza-lo), sera necessario realizar breves modificacoes no codigo antes de utiliza-lo. Assim, faremos:
 
+0- O programa para modelagem a ser aberto e o rentPricesModel.R - abra-o no programa de interesse (VSCode, Rstudio, etc)
+
 1- Bibliotecas! Antes de mais nada e necessario possuir as seguintes bibliotecas instaladas (Caso voce nao tenha, o comando necessario sera - install.packages(c("dplyr", "xgboost"))
 
 library(dplyr)
