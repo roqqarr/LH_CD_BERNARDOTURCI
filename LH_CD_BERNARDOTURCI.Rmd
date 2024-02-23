@@ -1,0 +1,448 @@
+---
+title: "Renting Price Prediction Model"
+author: "Bernardo Turci Carvalho"
+date: "2024-02-22"
+output: html_document
+---
+Ola! Esse e um arquivo de R-Markdown desenvolvido com o proposito de analisar os dados de uma plataforma de alugueis e baseado nas caracteristicas do local, recomendar um preco.
+
+A primeira etapa consiste em inicializar as bibliotecas usadas no projeto.
+
+```{r}
+library(ggplot2)
+library(e1071)
+library(tidyverse)
+library(dplyr)
+library(nortest)
+library(corrplot)
+library(car)
+library(glmnet)
+library(xgboost)
+```
+
+A proxima etapa consiste em selecionar o diretorio de trabalho, ou seja, a pasta de trabalho onde o RStudio ira identificar os arquivos de interesse. No nosso caso e o CSV, com o dataframe. Caso desejemos salvar alguma outra imagem ela sera salva no mesmo diretorio como default. Em seguida, faremos a leitura dos dados e pode-se iniciar a analise. Em seguida, faz-se a leitura dos dados.
+
+No caso, o usuario podera substituir " ... " por seu diretorio de interesse.
+
+```{r}
+setwd("C:/Users/alban/Desktop/Bernardo - IC/INDICUS PROJECT")
+
+#Leitura dos dados
+Prices_data <- read.csv(file="datasetRentPrices.csv", header=TRUE, sep=",", stringsAsFactors = FALSE)
+```
+
+Faz-se uma rapida verificacao se os dados foram obtidos corretamente.
+
+```{r}
+head(Prices_data)
+```
+
+Tudo certo. Vamos entao fazer uma breve analise dos dados relativos ao PRECO, uma vez que e nossa variavel de interesse.
+
+```{r}
+summary(Prices_data$price)
+cat("Valor da assimetria (skewness): ", skewness(Prices_data$price))
+cat("Valor da curtose (kurtosis): ", kurtosis(Prices_data$price))
+```
+
+Os valores indicam alto valor de curtose e assimetria positiva dos dados, corroborando para uma nao normalidade dos dados. O valor minimo do aluguel foi de USD 0, enquanto o maximo foi de USD 10.000. O que chama atencao, entretanto, e que o terceiro quadrante apresenta o valor de USD 175. Para as seguintes analises entao, e interessante remover os outliers para a observacao mais precisa do histograma. Faremos isso a nivel de 95%.
+
+```{r}
+# Primeiro Histograma de Analise dos Precos, com a extensao total dos dados,
+# 1000 bins, sem limite:
+Prices_data %>% ggplot(aes(x=price)) +
+  geom_histogram(aes(y = ..density..), color = "red", fill = "red", bins = 1000) +
+  geom_density(lwd=1, color="blue", fill = "blue", alpha = 0.15)
+
+# Como os dados se concentram na parte esquerda, vamos remover outliers (95%):
+
+Prices_data %>%
+  filter(price >= quantile(price, 0.025) & price <= quantile(price, 0.975)) %>%
+  ggplot(aes(x = price)) +
+  geom_histogram(aes(y = ..density..), color = "red", fill = "red") +
+  geom_density(lwd = 1, color = "blue", fill = "blue", alpha = 0.15)
+
+```
+
+Os valores indicam dominio de precos nos entornos de USD 100, com valores menores na faixa de USD 200 e muito poucos acima de USD 300. Sequencialmente faremos um breve teste de Anderson-Darling, para confirmar a nao normalidade dos dados.
+
+```{r}
+# Anderson-Darling Normality Test para checar normalidade dos dados
+ad.test(Prices_data$price)
+```
+
+O valor alto encontrado para "A" corrobora para uma interpretacao nao normal dos precos, sobretudo ao se levar em consideracao o p-valor. Assim rejeita-se a hipotese nula de normalidade. 
+
+Agora iremos avaliar como o preco se relaciona com os dados numericos. O primeiro deles e a Latitude.
+
+```{r}
+# Price vs Latitude
+
+ggplot(Prices_data, aes(x = latitude, y = price)) +
+  geom_point() +
+  labs(x = "Latitude", y = "Daily Price ($)")
+
+```
+
+O grafico assume um formato levemente hiperbolico, sendo que os maiores valores sao encontrados entre 40.7 e 40.8 graus de latitude. Tambem pode-se observar que as proximidades de 40.75 apresentam mais precos altos.
+
+O proximo grafico sera o de Preco e Longitude.
+
+```{r}
+# Price vs Longitude
+
+ggplot(Prices_data, aes(x = longitude, y = price)) +
+  geom_point() +
+  labs(x = "Longitude", y = "Daily Price ($)")
+
+```
+
+De forma similar e com mais precisao, o grafico nos mostra a presenca de valores maiores do preco entre -74 e -73.9 graus, especialmente proximos de -73.975. Assim, temos pontos de maior interesse comercial em pontos proximos a 40.75 de latitude e -73.975 de longitude.
+
+O proximo grafico a se considerar seria o de tipo de quarto e noites minimas de permanencia.
+
+```{r}
+# Room Type e Price
+
+ggplot(Prices_data, aes(x = room_type, y = price)) +
+  geom_point() +
+  labs(x = "Tipo de Propriedade", y = "Daily Price ($)")
+
+# Price vs N Noites
+
+ggplot(Prices_data, aes(x = minimo_noites, y = price)) +
+  geom_point() +
+  labs(x = "Min Nights", y = "Daily Price ($)")
+```
+
+A primeira observacao, relativa ao tipo de propriedade, mostra que existem mais variabilidade no preco de espacos inteiros, enquanto quartos privados existem de todos os precos, mas principalmente mais baratos. Ja quartos compartilhados sao exclusivamente mais baratos que os demais.
+
+Tambem traduz-se que quanto mais diarias obrigatorias, mais barato e o preco, nao excluindo entretanto baixo numero de diarias relacionados com precos baixos. Os dados se concentram na parte esquerda, entretanto, bem proximos a zero, relacionando a existencia majoritaria de baixas diarias para permanencia. Uma curiosidade que pode ser verificada com esses dados (sobretudo ao identificar-se que os dados se referem a cidade de Nova York) e a de que de fato existe uma bolha imobiliaria: existem muitos pontos que ultrapassam a marca de 30 noites e inclusive a marca de 180 noites. Isso pode servir como evidencia a proprietarios que utilizam a plataforma prioritariamente para aluguel de longos prazos para moradia, em detrimento de um contrato formal de aluguel.
+
+O proximo grafico e relativo ao numero de reviews no site.
+```{r}
+# Price vs N Reviews
+
+ggplot(Prices_data, aes(x = numero_de_reviews, y = price)) +
+  geom_point() +
+  labs(x = "Review Number", y = "Daily Price ($)")
+```
+
+Essa nova informacao corrobora para a ideia de que precos mais baixos tem mais reviews, possivelmente pelo fato de serem mais acessiveis e assim receberem mais pessoas. A presenca de baixo numero de reviews em moradias mais caras nao exclui a necessidade de reviews como condicionante do preco.
+
+Em seguida, trata-se das datas das ultimas reviews e preco.
+
+```{r}
+ggplot(Prices_data, aes(x = as.Date(ultima_review), y = price)) +
+  geom_point() +
+  labs(x = "Data da Ultima Review", y = "Daily Price ($)")
+```
+
+Parece existir uma concentracao no lado direito (mais recente), tanto para precos maiores quanto para numeros absolutos. Ou seja, poucos sao o casos de alugueis caros com reviews muito antigas.
+
+```{r}
+# Price vs Reviews por Mes
+
+ggplot(Prices_data, aes(x = reviews_por_mes, y = price)) +
+  geom_point() +
+  labs(x = "Reviews por Mes", y = "Daily Price ($)")
+
+```
+
+O grafico acima tem um formato muito similar ao do numero total de reviews, o que e um sinal inicial da presenca de forte correlacao entre os dados. 
+
+```{r}
+# Listagem dos Hosts e Preco
+
+ggplot(Prices_data, aes(x = calculado_host_listings_count, y = price)) +
+  geom_point() +
+  labs(x = "Numero de Propriedades dos Hosts", y = "Daily Price ($)")
+```
+
+Esse grafico traduz a existem de hosts unicos com muitas propriedades correlacionado a precos mais baixos, alem de que hosts com precos mais caros tendem a ter poucas ou unicas listagens no site.
+
+Por fim, a disponibilidade anual das casas/aptos.
+
+```{r}
+# Disponibilidade e Preco
+
+ggplot(Prices_data, aes(x = disponibilidade_365, y = price)) +
+  geom_point() +
+  labs(x = "Disponibilidade (365 dias)", y = "Daily Price ($)")
+
+```
+
+Esse grafico faz outra observacao condizente com a acessibilidade das propriedades: algumas casas mais caras costumam estar disponiveis mais tempo que as mais baratas, mas a distribuicao parece ser uniforme - existem tantas casas baratas disponiveis o ano todo quanto com pouca disponibilidade. Entao sera que a disponibilidade esta correlacionada com a localizacao? Os proximos graficos irao abordar essa questao.
+
+```{r}
+# Disponibilidade e Latitude
+
+ggplot(Prices_data, aes(x = latitude, y = disponibilidade_365)) +
+  geom_point() +
+  labs(x = "Latitude", y = "Disponibilidade (365 dias)")
+
+# Disponibilidade e Longitude
+
+ggplot(Prices_data, aes(x = longitude, y = disponibilidade_365)) +
+  geom_point() +
+  labs(x = "Longitude", y = "Disponibilidade (365 dias)")
+
+```
+
+Os graficos parecem ter uniforme distribuicao, mas reforcam a concentracao nos eixos previamente observados. 
+
+A proxima etapa consiste em fazer modificacoes nos dados para dar inicio a modelagem. Aqui faremos a substituicao de valores Na por zero, uma vez que o Na resulta de uma divisao por zero -> entao tambem pode ser zero.
+
+Ja para o caso do tipo de propriedade, verifica-se que so existe tres possibilidades: Entire home/apt, Private Room e Shared Room (1,0,-1, respectivamente). 
+```{r}
+# A proxima etapa consiste em transformar os valores NA em zero, ja que resultam
+# de uma divisao por zero.
+
+Prices_data$reviews_por_mes <- replace(Prices_data$reviews_por_mes, is.na(Prices_data$reviews_por_mes), 0)
+
+# Aqui, transformamos a variavel "Tipo de Quarto" em uma numerica e removemos as 6 primeiras colunas
+# uma vez q nao serao uteis para a matriz de correlacao a ser feita a seguir.
+
+uniquerooms <- unique(Prices_data$room_type)
+
+pricesData2 <- Prices_data %>%
+  mutate(
+    room_type = case_when(
+      room_type == "Entire home/apt" ~ 1,
+      room_type == "Private room" ~ 0,
+      room_type == "Shared room" ~ -1,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(where(is.numeric), -ultima_review, -id, -host_id, -calculado_host_listings_count)
+```
+
+Em seguida, faz-se a matriz de correlacao.
+
+```{r}
+corrMatrix <- cor(pricesData2)
+corrplot(corrMatrix, method = "circle", type = "upper", diag = FALSE, order = "hclust")
+```
+
+O unico ponto mais relevante para a pesquisa nesse momento e entre numero de reviews e reviews por mes, corroborando para a hipotese que levantamos acima. Entao, para a modelagem, sera descartada a coluna de reviews por mes.
+
+Sequencialmente, iremos geo-localizar as propriedades atraves das coordenadas informadas.
+
+```{r}
+# Agora iremos identificar quantos bairros diferentes existem, e cada um deles.
+
+uniqueBairros <- unique(Prices_data$bairro_group)
+numBairros <- length(uniqueBairros)
+colorBairros <- scales::brewer_pal()(numBairros)
+mapaDataset <- setNames(colorBairros, uniqueBairros)
+
+# Mapa com as Casas
+ggplot(Prices_data, aes(x = longitude, y = latitude, color = bairro_group)) +
+  geom_point() +
+  scale_color_manual(values = mapaDataset) +
+  labs(title = "Renting Locations by Neighborhood", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+
+```
+
+Voltando as hipoteses, se mapearmos as coordenadas que levantamos com os maiores precos, teremos a regiao de Manhattan como possivelmente sendo a de maior destaque. Para confirmar levantaremos um mapa de calor, utilizando o preco como determinante.
+
+```{r}
+ggplot(Prices_data, aes(x = longitude, y = latitude, fill = price)) +
+  geom_point(shape = 21, size = 1.5) +
+  scale_fill_gradient(low = "yellow", high = "darkred", limits = c(0, 300), name = "Price", na.value = "darkred") +
+  scale_color_gradient(low = "yellow", high = "darkred", limits = c(0, 300), name = "Price", na.value = "darkred") +
+  labs(title = "Renting Locations by Price", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+O mapa confirma a hipotese, entao, respondendo a questao levantada na proposta do desafio: a regiao de Manhattan seria o melhor alvo para um investidor. 
+
+Como queremos extrair mais informacoes, e interessante verificar os sub-grupos (bairros), que faremos a seguir.
+
+```{r}
+
+#Como existem mais de 200 bairros em toda a regiao de Nova York, seleciona-se os mais populares.
+bairroPopular <- Prices_data %>%
+  group_by(bairro) %>%
+  summarise(n = n()) %>%
+  top_n(20, n) %>%
+  pull(bairro)
+
+popularPricesData <- Prices_data %>%
+  filter(bairro %in% bairroPopular)
+
+ggplot(popularPricesData, aes(x = bairro, y = price)) +
+  geom_boxplot() +
+  labs(title = "Top 20 - Bairros Populares versus Daily Rent Price ($)",
+       x = "Bairro",
+       y = "Daily Price ($)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+Com base nessas informacoes, e possivel que a regiao de Upper West Side, por contemplar maior amplitude, seja uma boa opcao para investir-se. 
+
+Agora inicia-se a parte da modelagem. Iremos testar tres tipos de modelagem:
+1- Regressao Linear: modelo que busca relacionar linearmente a relacao entre a variavel dependente (preco) e as variaveis independentes(demais variaveis), buscando fazer uma linha reta de previsibilidade.
+2- Regressao LASSO(Least Absolute Shrinkage and Selection Operator): busca aprofundar a regressao linear, adicionando uma penalizacao a magnitude dos coeficientes e reducao de overfitting.
+3- Modelo de Aprendizado XGBOOST: baseia-se na criacao de arvores de decisao, com eficiencia e desempenho, combinando arvores e otimiza-se a previsao dos resultados. (Confesso que nunca havia ouvido falar desse metodo e foi necessaria pesquisa especifica para utilizacao do mesmo)
+
+A primeira etapa e realizar um slicing dos dados para prepara-los para modelagem. Iremos usar uma proporcao de 80-20, de forma a obter um dataset de 80% de treino para o modelo e 20% para o teste.
+
+```{r}
+set.seed(123)
+indexI <- sample(1:nrow(pricesData2), size=nrow(pricesData2))
+trainDataset <- pricesData2[indexI[1:(round(0.8*nrow(pricesData2)))], ]
+testDataset <- pricesData2[indexI[((round(0.8*nrow(pricesData2))) + 1):nrow(pricesData2)], ]
+```
+
+Sequencialmente faremos algumas regressoes lineares, tentando determinar qual possui o menor erro. Usaremos como teste tano o Mean Absolute Error quanto o Mean Squared Error, que penaliza erros muito grandes. 
+
+```{r}
+### Modelo de Regressao Linear 1 ###
+linearTeste1 <- lm(price ~ latitude + longitude + room_type + minimo_noites + numero_de_reviews + disponibilidade_365, data = trainDataset)
+summary(linearTeste1)
+
+# Avaliando Modelo Linear 1
+
+linearPredictions <- predict(linearTeste1, newdata = testDataset)
+linearMAE <- mean(abs(linearPredictions - testDataset$price))
+linearMSE <- mean((linearPredictions - testDataset$price)^2)
+linearMAPE <- mean(abs(linearPredictions - testDataset$price) / testDataset$price) * 100
+cat("MAE: ", linearMAE," MSE: ", linearMSE, " MAPE: ", linearMAPE)
+
+```
+
+A proxima modelagem remove o minimo de noites.
+
+```{r}
+# Modelo de Regressao Linear 2 - removendo noites minimas
+linearTeste2 <- lm(price ~ latitude + longitude + room_type + numero_de_reviews + disponibilidade_365, data = trainDataset)
+summary(linearTeste2)
+
+# Avaliando Modelo Linear 2
+
+linearPredictions2 <- predict(linearTeste2, newdata = testDataset)
+linearMAE2 <- mean(abs(linearPredictions2 - testDataset$price))
+linearMSE2 <- mean((linearPredictions2 - testDataset$price)^2)
+linearMAPE2 <- mean(abs(linearPredictions2 - testDataset$price) / testDataset$price) * 100
+cat("MAE: ", linearMAE2," MSE: ", linearMSE2, " MAPE: ", linearMAPE2)
+```
+
+Por fim, consideramos somente latitude e longitude.
+
+```{r}
+# Modelo de Regressao Linear 3 - deixando so latitude e longitude
+linearTeste3 <- lm(price ~ latitude + longitude, data = trainDataset)
+summary(linearTeste3)
+
+# Avaliando Modelo Linear 3
+
+linearPredictions3 <- predict(linearTeste3, newdata = testDataset)
+linearMAE3 <- mean(abs(linearPredictions3 - testDataset$price))
+linearMSE3 <- mean((linearPredictions3 - testDataset$price)^2)
+linearMAPE3 <- mean(abs(linearPredictions3 - testDataset$price) / testDataset$price) * 100
+cat("MAE: ", linearMAE3," MSE: ", linearMSE3, " MAPE: ", linearMAPE3)
+```
+
+Como houve aumento muito grande do erro, consideramos que todas as variaveis sao importantes para definir-se o preco.
+
+A proxima modelagem sera relativa ao tipo LASSO.
+
+```{r}
+## Modelo Lasso 1 ##
+
+axisX <- as.matrix(trainDataset[, c("latitude", "longitude", "room_type", "minimo_noites", "numero_de_reviews", "disponibilidade_365")])
+axisY <- trainDataset$price
+
+# Conforme documentacao glmnet, alpha = 1 para Lasso.
+
+lassoTeste <- cv.glmnet(axisX, axisY, alpha = 1) 
+
+# Predicoes do Lasso:
+
+testAxisX <- as.matrix(testDataset[, c("latitude", "longitude", "room_type", "minimo_noites", "numero_de_reviews", "disponibilidade_365")])
+lassoPredictions <- predict(lassoTeste, newx = testAxisX, s = lassoTeste$lambda.min)
+
+# Avaliacao do Modelo Lasso 
+lassoMAE <- mean(abs(lassoPredictions - testDataset$price))
+lassoMSE <- mean((lassoPredictions - testDataset$price)^2)
+lassoMAPE <- mean(abs(lassoPredictions - testDataset$price) / testDataset$price) * 100
+cat("LASSO - MAE: ", lassoMAE," MSE: ", lassoMSE, " MAPE: ", lassoMAPE)
+```
+
+Observa-se que os valores continuaram proximos da regressao linear. Assim sendo, faremos mais um LASSO para verificar seu comportamento.
+
+```{r}
+## Modelo Lasso 2##
+
+axisX2 <- as.matrix(trainDataset[, c("latitude", "longitude", "room_type", "numero_de_reviews", "disponibilidade_365")])
+axisY2 <- trainDataset$price
+
+# Conforme documentacao glmnet, alpha = 1 para Lasso.
+
+lassoTeste2 <- cv.glmnet(axisX2, axisY2, alpha = 1) 
+
+# Predicoes do Lasso:
+
+testAxisX2 <- as.matrix(testDataset[, c("latitude", "longitude", "room_type", "numero_de_reviews", "disponibilidade_365")])
+lassoPredictions2 <- predict(lassoTeste2, newx = testAxisX2, s = lassoTeste2$lambda.min)
+
+# Avaliacao do Modelo Lasso 
+lassoMAE2 <- mean(abs(lassoPredictions2 - testDataset$price))
+lassoMSE2 <- mean((lassoPredictions2 - testDataset$price)^2)
+lassoMAPE2 <- mean(abs(lassoPredictions2 - testDataset$price) / testDataset$price) * 100
+cat("LASSO - MAE2: ", lassoMAE2," MSE2: ", lassoMSE2, " MAPE2: ", lassoMAPE2)
+```
+
+Como os valores acompanham, diremos que de fato a dependencia de todas variaveis existe, e que os modelos de regressao deixam erros similares.
+
+Sequencialmente sera feita uma ultima modelagem quanto ao tipo XGBOOST.
+
+```{r}
+## XGBOOST Modelo de Regressao ##
+
+
+# A primeira etapa para realizar o XGBOOST sera a definicao das variaveis independentes (features) e a dependente (target)
+
+featuresXGB <- c("latitude", "longitude", "room_type", "minimo_noites", "numero_de_reviews")
+targetXGB <- "price"
+
+# transforma-se o dataset em uma matriz, tanto o de TREINO quanto o de TESTE.
+trainXGBdata <- model.matrix(~ . - 1, data = trainDataset[, c(featuresXGB,targetXGB)])
+testXGBdata <- model.matrix(~ . - 1, data = testDataset[, c(featuresXGB,targetXGB)])
+
+# matriz xgb
+dtrain <- xgb.DMatrix(data = trainXGBdata, label = trainXGBdata[, targetXGB])
+dtest <- xgb.DMatrix(data = testXGBdata, label = testXGBdata[, targetXGB])
+
+# parametros de observacao para chamar a funcao xgboost em seguida
+
+params <- list(
+  objective = "reg:squarederror",  
+  booster = "gbtree",              
+  eval_metric = "rmse"
+)
+# Modelo propriamente dito XGBOOST
+xgbTeste1 <- xgboost(params = params, data = dtrain, nrounds = 100)
+xgbPredictions1 <- predict(xgbTeste1, dtest)
+
+# Avaliacao do Modelo XGBOOST
+xgbMAE1 <- mean(abs(xgbPredictions1 - testXGBdata[, targetXGB]))
+xgbMSE1 <- mean((xgbPredictions1 - testXGBdata[, targetXGB])^2)
+xgbMAPE1 <- mean(abs(xgbPredictions1 - testXGBdata[, targetXGB]) / testXGBdata[, targetXGB]) * 100
+
+# Aqui alocamos o valor em um data frame unico para comparacao futura.
+XGBValuation <- data.frame(xgbPredictions1)
+cat("XGBOOST - MAE: ", xgbMAE1," MSE: ", xgbMSE1, " MAPE: ", xgbMAPE1)
+```
+
+Esse metodo demonstrou chegar a valores muito proximos e funcionar corretamente. Sera o modelo escolhido final.
+
+Por fim, faria-se um loop para interacao com usuario, para que ele faca suas entradas e consulte qual deveria ser o valor da propriedade, citando, inclusive, qual a diferenca entre o algoritmo e o valor da publicacao.
+
+Infelizmente nao tenho conhecimentos suficientes (ate o momento :) ) para fazer pesquisas mais especificas envolvendo o texto do anuncio. Gostaria de explicitar tambem que acredito que outros fatores apresentam mais relevancia para o preco, como amenidades, utensilios, area da casa, por exemplo. Presenca de supermercados, farmacias e metro com certeza sao dummies interessantes para se avaliar. Eu sugeriria extrair esses dados como forma de se obter mais precisao.
+
+Espero ter podido responder, ao menos em parte, o desafio.
+
+Obrigado pela oportunidade!
