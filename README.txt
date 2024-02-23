@@ -10,7 +10,7 @@ library(xgboost)
 2- Otimo, tudo certo :). Agora teremos que acrescentar, na linha 7, o working directory (em portugues, diretorio de trabalho) que nada mais e que a pasta no computador que o R ira "trabalhar". No meu caso, o meu seria: 
 "C:/Users/.../Bernardo/INDICUS PROJECT"
 
-Caso nao consiga, basta abrir o explorador de arquivos copiar e colar. Atencao: muitas vezes as barras sao invertidas, teste e caso nao funcione, faca a inversao das barras :)
+Caso nao consiga, basta abrir o explorador de arquivos copiar e colar. Atencao: muitas vezes as barras sao invertidas, teste e caso nao funcione, faca a inversao das barras (/ -> \) :)
 
 3- Bom, agora e preciso fazer a leitura do arquivo com o dataset. Para isso sera necessario mudar o arquivo na linha 12 do codigo, na funcao read.csv(). No meu caso, seria:
 read.csv(file="datasetRentPrices.csv", header=TRUE, sep=",", stringsAsFactors = FALSE)
